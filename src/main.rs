@@ -5,8 +5,10 @@ use ndarray::{Array2, Axis};
 use rplidar_drv::{RplidarDevice, ScanOptions};
 use std::collections::HashMap;
 use std::time::Duration;
+use reqwest;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize RPLidar
     // Note: Replace "/dev/ttyUSB0" with your actual port
     // Windows example: "COM3"
@@ -32,6 +34,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start scanning
     let scan_options = ScanOptions::default();
     lidar.start_scan_with_options(&scan_options)?;
+
+    let server_url = "http://your-ground-server.com/lidar-data"; // Replace with your actual server URL
 
     loop {
         // Collect points from one complete scan
@@ -103,6 +107,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Clear terminal for next update
         print!("\x1B[2J\x1B[1;1H");
+
+        // Convert labels to Vec<Option<usize>>
+        let point_labels: Vec<Option<usize>> = labels.iter().map(|&l| l).collect();
+
+        if let Err(e) = send_data_to_ground_server(&scan_points, &bounding_boxes, &point_labels, server_url).await {
+            eprintln!("Failed to send data to ground server: {}", e);
+        }
     }
 }
 
@@ -116,7 +127,7 @@ fn summarize_clusters(label_count: &HashMap<Option<usize>, usize>) {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[allow(dead_code)]
 struct BoundingBox {
     center: (f32, f32),
@@ -147,4 +158,38 @@ fn calculate_bounding_box(points: &Array2<f32>) -> BoundingBox {
         height,
         theta,
     }
+}
+
+#[derive(serde::Serialize)]
+struct LidarData<'a> {
+    timestamp: u64,
+    scan_points: &'a Vec<[f32; 2]>,
+    point_labels: &'a Vec<Option<usize>>,
+    bounding_boxes: &'a Vec<(usize, BoundingBox)>,
+}
+
+async fn send_data_to_ground_server(
+    scan_points: &Vec<[f32; 2]>,
+    bounding_boxes: &Vec<(usize, BoundingBox)>,
+    point_labels: &Vec<Option<usize>>,
+    server_url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    
+    let data = LidarData {
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs(),
+        scan_points,
+        point_labels,
+        bounding_boxes,
+    };
+
+    client
+        .post(server_url)
+        .json(&data)
+        .send()
+        .await?;
+
+    Ok(())
 }
