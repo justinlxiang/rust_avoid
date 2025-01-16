@@ -5,6 +5,7 @@ use linfa::dataset::{DatasetBase, Labels};
 use ndarray::{Array2, Axis, array};
 use ndarray_rand::rand::SeedableRng;
 use rand_xoshiro::Xoshiro256Plus;
+use std::collections::HashMap;
 
 fn main() {
     let seed = 42;
@@ -17,41 +18,18 @@ fn main() {
     // (100 points each) centered around our `expected_centroids`
     let observations: DatasetBase<_, _> = generate::blobs(10, &expected_centroids, &mut rng).into();
 
-    println!("Observations: {:?}", observations);
-
     let min_points = 3;
     let clusters = Dbscan::params(min_points)
         .tolerance(10.0)
         .transform(observations)
         .unwrap();
 
-
-    println!("Clusters: {:?}", clusters);
-
     let label_count = clusters.label_count().remove(0);
-
-    println!();
-    println!("Result: ");
-    for (label, count) in &label_count {
-        match label {
-            None => println!(" - {} noise points", count),
-            Some(i) => println!(" - {} points in cluster {}", count, i),
-        }
-    }
-    println!();
+    summarize_clusters(&label_count);
 
     // Print each point and its cluster label
     let points = clusters.records();
     let labels = clusters.targets();
-    
-    println!("Points and their clusters:");
-    for (point, &label) in points.rows().into_iter().zip(labels.iter()) {
-        let point_vec: Vec<f64> = point.to_vec();
-        match label {
-            None => println!("Point {:?} is noise", point_vec),
-            Some(cluster_id) => println!("Point {:?} belongs to cluster {}", point_vec, cluster_id),
-        }
-    }
 
     // Create a Vec to store points for each cluster
     let num_clusters = label_count.len();
@@ -83,8 +61,18 @@ fn main() {
     }
 }
 
+fn summarize_clusters(label_count: &HashMap<Option<usize>, usize>) {
+    println!("Result: ");
+    for (label, count) in label_count {
+        match label {
+            None => println!(" - {} noise points", count),
+            Some(i) => println!(" - {} points in cluster {}", count, i),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct BoundingBox {
     center: (f64, f64),
     width: f64,
