@@ -4,7 +4,6 @@ use linfa_clustering::Dbscan;
 use ndarray::{Array2, Axis};
 use rplidar_drv::{RplidarDevice, ScanOptions};
 use std::collections::HashMap;
-use std::time::Duration;
 use reqwest;
 
 #[tokio::main]
@@ -41,18 +40,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Collect points from one complete scan
         let mut scan_points = Vec::new();
 
-        // Read points for about 1 second (typical time for one complete scan)
-        let start_time = std::time::Instant::now();
-        while start_time.elapsed() < Duration::from_secs(1) {
-            if let Ok(scan) = lidar.grab_scan() {
-                for point in scan {
-                    // Convert polar coordinates (angle, distance) to Cartesian (x, y)
-                    let angle_rad = point.angle().to_radians();
-                    let x = point.distance() * angle_rad.cos();
-                    let y = point.distance() * angle_rad.sin();
-                    scan_points.push([x, y]);
-                }
+        if let Ok(scan) = lidar.grab_scan() {
+            for point in scan {
+                // Convert polar coordinates (angle, distance) to Cartesian (x, y)
+                let angle_rad = point.angle().to_radians();
+                let x = point.distance() * angle_rad.cos();
+                let y = point.distance() * angle_rad.sin();
+                scan_points.push([x, y]);
             }
+        } else {
+            println!("Failed to grab scan");
+            continue;
         }
 
         // Convert scan points to ndarray
