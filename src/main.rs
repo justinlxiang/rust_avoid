@@ -1,63 +1,103 @@
 use linfa::traits::*;
 use linfa_clustering::Dbscan;
-use linfa_datasets::generate;
 use linfa::dataset::{DatasetBase, Labels};
-use ndarray::{Array2, Axis, array};
-use ndarray_rand::rand::SeedableRng;
-use rand_xoshiro::Xoshiro256Plus;
+use ndarray::{Array2, Axis};
+use rplidar_drv::{RplidarDevice, ScanOptions};
 use std::collections::HashMap;
+use std::time::Duration;
 
-fn main() {
-    let seed = 42;
-    let mut rng = Xoshiro256Plus::seed_from_u64(seed);
-
-    // `expected_centroids` has shape `(n_centroids, n_features)`
-    // i.e. three points in the 2-dimensional plane
-    let expected_centroids = array![[0., 0.], [-100., -100.], [100., 100.]];
-    // Let's generate a synthetic dataset: three blobs of observations
-    // (100 points each) centered around our `expected_centroids`
-    let observations: DatasetBase<_, _> = generate::blobs(10, &expected_centroids, &mut rng).into();
-
-    let min_points = 3;
-    let clusters = Dbscan::params(min_points)
-        .tolerance(10.0)
-        .transform(observations)
-        .unwrap();
-
-    let label_count = clusters.label_count().remove(0);
-    summarize_clusters(&label_count);
-
-    // Print each point and its cluster label
-    let points = clusters.records();
-    let labels = clusters.targets();
-
-    // Create a Vec to store points for each cluster
-    let num_clusters = label_count.len();
-    let mut cluster_points: Vec<(usize, Array2<f64>)> = Vec::with_capacity(num_clusters);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize RPLidar
+    // Note: Replace "/dev/ttyUSB0" with your actual port
+    // Windows example: "COM3"
+    let serial_port = serialport::new("/dev/tty.usbserial-0001", 115200).open().unwrap();
+    let mut lidar = RplidarDevice::with_stream(serial_port);
     
-    // Initialize empty arrays for each cluster
-    for i in 0..num_clusters {
-        cluster_points.push((i, Array2::zeros((0, 2))));
-    }
+    // Stop any existing scan
+    lidar.stop()?;
+    
+    // Get device info
+    let info = lidar.get_device_info()?;
+    println!("Connected to RPLidar device:");
+    println!("  Model: {}", info.model);
+    println!("  Firmware: {}", info.firmware_version as u16);
+    println!("  Hardware: {}", info.hardware_version as u16);
+    println!("  Serial number: {}, {}", info.serialnum[0], info.serialnum[1]);
 
-    // Group points by their cluster labels 
-    for (point, &label) in points.rows().into_iter().zip(labels.iter()) {
-        if let Some(cluster_id) = label {
-            let point_vec = point.to_vec();
-            let new_row = Array2::from_shape_vec((1, 2), point_vec).unwrap();
-            
-            if let Some((_, arr)) = cluster_points.iter_mut().find(|(id, _)| *id == cluster_id) {
+    // Start scanning
+    let scan_options = ScanOptions::default();
+    lidar.start_scan_with_options(&scan_options)?;
+
+    loop {
+        // Collect points from one complete scan
+        let mut scan_points = Vec::new();
+        
+        // Read points for about 1 second (typical time for one complete scan)
+        let start_time = std::time::Instant::now();
+        while start_time.elapsed() < Duration::from_secs(1) {
+            if let Ok(scan) = lidar.grab_scan() {
+                for point in scan {
+                    // Convert polar coordinates (angle, distance) to Cartesian (x, y)
+                    let angle_rad = point.angle().to_radians();
+                    let x = point.distance() * angle_rad.cos();
+                    let y = point.distance() * angle_rad.sin();
+                    scan_points.push([x, y]);
+                }
+            }
+        }
+
+        // Convert scan points to ndarray
+        let points = Array2::from_shape_vec(
+            (scan_points.len(), 2),
+            scan_points.iter().flat_map(|p| vec![p[0], p[1]]).collect(),
+        )?;
+
+        // Create dataset
+        let observations: DatasetBase<_, _> = DatasetBase::from(points);
+
+        // Perform DBSCAN clustering
+        let min_points = 3;
+        let clusters = Dbscan::params(min_points)
+            .tolerance(100.0) // Adjusted for LiDAR data scale
+            .transform(observations)
+            .unwrap();
+
+        let label_count = clusters.label_count().remove(0);
+        summarize_clusters(&label_count);
+
+        let points = clusters.records();
+        let labels = clusters.targets();
+
+        // Create a Vec to store points for each cluster
+        let num_clusters = label_count.len();
+        let mut cluster_points: Vec<(usize, Array2<f32>)> = Vec::with_capacity(num_clusters);
+        
+        // Initialize empty arrays for each cluster
+        for i in 0..num_clusters {
+            cluster_points.push((i, Array2::zeros((0, 2))));
+        }
+
+        // Group points by their cluster labels 
+        for (point, &label) in points.rows().into_iter().zip(labels.iter()) {
+            if let Some(cluster_id) = label {
+                let point_vec = point.to_vec();
+                let new_row = Array2::from_shape_vec((1, 2), point_vec).unwrap();
+                
+                let (_, arr) = &mut cluster_points[cluster_id];
                 *arr = ndarray::concatenate![Axis(0), arr.view(), new_row.view()];
             }
         }
-    }
 
-    // Calculate and store bounding box for each cluster
-    let mut bounding_boxes: Vec<(usize, BoundingBox)> = Vec::new();
-    for (label, points_array) in &cluster_points {
-        let bbox = calculate_bounding_box(points_array);
-        bounding_boxes.push((*label, bbox.clone()));
-        println!("Bounding box for cluster {}: {:?}", label, bbox);
+        // Calculate and store bounding box for each cluster
+        let mut bounding_boxes: Vec<(usize, BoundingBox)> = Vec::new();
+        for (label, points_array) in cluster_points.iter() {
+            let bbox = calculate_bounding_box(points_array);
+            println!("Bounding box for cluster {}: {:?}", label, bbox);
+            bounding_boxes.push((*label, bbox));
+        }
+
+        // Clear terminal for next update
+        print!("\x1B[2J\x1B[1;1H");
     }
 }
 
@@ -74,20 +114,20 @@ fn summarize_clusters(label_count: &HashMap<Option<usize>, usize>) {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct BoundingBox {
-    center: (f64, f64),
-    width: f64,
-    height: f64,
-    theta: f64,
+    center: (f32, f32),
+    width: f32,
+    height: f32,
+    theta: f32,
 }
 
-fn calculate_bounding_box(points: &Array2<f64>) -> BoundingBox {
+fn calculate_bounding_box(points: &Array2<f32>) -> BoundingBox {
     let x_coords = points.column(0);
     let y_coords = points.column(1);
     
-    let x_min = x_coords.fold(f64::INFINITY, |acc, &x| acc.min(x));
-    let x_max = x_coords.fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
-    let y_min = y_coords.fold(f64::INFINITY, |acc, &y| acc.min(y));
-    let y_max = y_coords.fold(f64::NEG_INFINITY, |acc, &y| acc.max(y));
+    let x_min = x_coords.fold(f32::INFINITY, |acc, &x| acc.min(x));
+    let x_max = x_coords.fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
+    let y_min = y_coords.fold(f32::INFINITY, |acc, &y| acc.min(y));
+    let y_max = y_coords.fold(f32::NEG_INFINITY, |acc, &y| acc.max(y));
 
     // Calculate bounding box properties
     let center_x = (x_min + x_max) / 2.0;
