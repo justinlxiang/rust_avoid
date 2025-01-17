@@ -103,9 +103,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             bounding_boxes.push((*label, bbox));
         }
 
-        // Clear terminal for next update
-        print!("\x1B[2J\x1B[1;1H");
-
         // Convert labels to Vec<Option<usize>>
         let point_labels: Vec<Option<usize>> = labels.iter().map(|&l| l).collect();
 
